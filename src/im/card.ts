@@ -137,6 +137,16 @@ export class ThrottledCardUpdater {
         await this.updateCard(finalCard);
     }
 
+    async cancel(): Promise<void> {
+        if (this.closed) return;
+        this.closed = true;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = undefined;
+        this.pendingCard = undefined;
+        await this.updateChain;
+    }
+
+
     /**
      * 调度定时器：开启2秒延迟
      * 如果定时器已存在（窗口正在计时），直接return，不会重复创建

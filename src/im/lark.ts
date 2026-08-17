@@ -172,6 +172,7 @@ export function startBot(opts: BotOptions): Bot {
     // 构造对外暴露的Bot实例
     const bot: Bot = {
         client,
+        // replyInThread 归入你指定的 thread_id 话题里，作为这个话题下的一条回复
         async reply(messageId: string, text: string, replyInThread = false) {
             try {
                 // 调用飞书消息回复接口
