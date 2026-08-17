@@ -8,6 +8,8 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import { parseMentions, type Mention } from "./message-parser.js";
 import { mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
+import type { CardJson } from "./card.js";
+
 
 /**
  * 收到的飞书消息标准化结构
@@ -83,6 +85,9 @@ export interface Bot {
         fileName?: string,
     ) => Promise<string>;
 
+    replyCard: (messageId: string, card: CardJson, replyInThread?: boolean) =>
+        Promise<string | undefined>;
+    updateCard: (messageId: string, card: CardJson) => Promise<void>;
 }
 
 /**
@@ -199,6 +204,25 @@ export function startBot(opts: BotOptions): Bot {
             await res.writeFile(savePath);
             return savePath;
         },
+        async replyCard(messageId, card, replyInThread = false) {
+            const res = await client.im.v1.message.reply({
+                path: { message_id: messageId },
+                data: {
+                    msg_type: 'interactive', // 卡片消息
+                    content: JSON.stringify(card),
+                    ...(replyInThread ? { reply_in_thread: true } : {}),
+                },
+            });
+            return res.data?.message_id;
+        },
+        async updateCard(messageId, card) {
+            await client.im.v1.message.patch({
+                path: { message_id: messageId },
+                data: { content: JSON.stringify(card) },
+            });
+        },
+
+
     };
 
     // 事件分发器：注册需要监听的飞书事件
