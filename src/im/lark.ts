@@ -125,6 +125,7 @@ function extractText(messageType: string, content: string): string {
 
 
 
+// 常见图片 MIME 类型 → 文件扩展名映射表（下载资源时推断扩展名用）
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -134,6 +135,10 @@ const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
     "image/x-icon": "ico",
 };
 
+/**
+ * 从响应头中安全取值：
+ * 兼容 Headers 对象（有 .get 方法）和普通对象（大小写两种键都尝试）
+ */
 function getHeader(headers: any, name: string): string {
     const value =
         typeof headers?.get === "function"
@@ -142,14 +147,22 @@ function getHeader(headers: any, name: string): string {
     return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
 }
 
+/**
+ * 确定下载文件的扩展名，优先级：
+ * 1. 原始文件名自带合法扩展名（如 report.xlsx → xlsx）
+ * 2. 响应头 Content-Type 映射（如 image/png → png）
+ * 3. 兜底：图片用 img，其他用 bin
+ */
 function resourceExtension(
     type: "image" | "file",
     fileName: string | undefined,
     contentType: string,
 ): string {
+    // 原始文件名中的扩展名（限定为 1-10 位字母数字，防止路径注入）
     const original = fileName ? extname(fileName).slice(1).toLowerCase() : "";
     if (/^[a-z0-9]{1,10}$/.test(original)) return original;
 
+    // 按 Content-Type 映射
     const mime = contentType.split(";", 1)[0].trim().toLowerCase();
     return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === "image" ? "img" : "bin");
 }

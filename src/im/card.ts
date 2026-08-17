@@ -19,15 +19,24 @@ const STATUS_STYLE = {
     failed: { template: "red", label: "执行失败" },
 } as const;
 
+/** 把进度限制在 0-100 的整数区间 */
 function clampProgress(progress: number): number {
     return Math.min(100, Math.max(0, Math.round(progress)));
 }
 
+/** 渲染进度条字符：10 格，█ 表示已完成、░ 表示未完成 */
 function buildProgressBar(progress: number): string {
     const filled = Math.round(progress / 10);
     return `${"█".repeat(filled)}${"░".repeat(10 - filled)}`;
 }
 
+/**
+ * 构建飞书任务卡片 JSON（卡片协议 schema 2.0）：
+ * - header：彩色标题（蓝=运行中 / 绿=已完成 / 红=执行失败）
+ * - body：状态 + 进度条 + 当前动作 + 最近进展列表 + 一个禁用按钮
+ * - config.update_multi：共享卡片，后续 updateCard 会同步刷新所有看过的人
+ * - config.summary：聊天列表里的消息预览（不点开也能看到状态）
+ */
 export function buildTaskCard(options: TaskCardOptions): CardJson {
     const progress = clampProgress(options.progress);
     const style = STATUS_STYLE[options.status];
