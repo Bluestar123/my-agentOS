@@ -10,6 +10,7 @@ import { buildTaskCard } from './im/card.js';
 import { SessionManager } from "./core/session-manager.js";
 import { formatSessionStatus, markSessionIdle, runCardDemo } from './mock/index.js';
 import { parseCommand } from "./core/command-parser.js";
+import { JsonSessionStore } from "./core/session-store.js";
 
 const appId = process.env.BOT_A_APP_ID;
 const appSecret = process.env.BOT_A_APP_SECRET;
@@ -21,7 +22,10 @@ if (!appId || !appSecret) {
 
 console.log('Agent OS 启动，正在建立飞书长连接…');
 
-const sessions = new SessionManager();
+const sessions = await SessionManager.open({
+    store: new JsonSessionStore(join("data", "sessions.json")),
+});
+console.log(`[会话] 已恢复 ${sessions.size} 个会话`);
 
 const activeRuns = new Map<string, AbortController>();
 
@@ -34,7 +38,7 @@ startBot({
         console.log(`rootid=${msg.rootId} threadid=${msg.threadId}`)
         // 回复（话题内回复，replyInThread=true）
         const hasThread = !!msg.threadId || !!msg.rootId;
-        const { session, isNew } = sessions.resolve(msg);
+        const { session, isNew } = await sessions.resolve(msg);
 
 
         console.log(
@@ -64,7 +68,9 @@ startBot({
         }
         if (command?.name === 'close') {
             activeRuns.get(session.id)?.abort();
-            if (session.status !== 'closed') sessions.transition(session.id, 'closed');
+            if (session.status !== 'closed') {
+                await sessions.transition(session.id, 'closed')
+            }
             await bot.reply(
                 msg.messageId,
                 '当前会话已关闭。需要继续时，请新开一个话题。',
@@ -81,6 +87,15 @@ startBot({
             );
             return;
         }
+        //首次写盘期间的保护
+        if (!isNew && session.status === 'creating') {
+            await bot.reply(
+                msg.messageId,
+                '当前会话正在准备，请稍后再追问。',
+                hasThread,
+            );
+            return;
+        }
         if (session.status === 'active') {
             await bot.reply(
                 msg.messageId,
@@ -90,7 +105,7 @@ startBot({
             return;
         }
 
-        sessions.transition(session.id, 'active');
+        await sessions.transition(session.id, 'active');
 
         const run = new AbortController();
         activeRuns.set(session.id, run);
@@ -126,7 +141,7 @@ startBot({
             // 失败了，要删除
             if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
 
-            markSessionIdle(session.id, sessions);
+            await markSessionIdle(session.id, sessions);
             throw error;
         }
 
@@ -134,7 +149,7 @@ startBot({
             console.error("[卡片] 响应里没有 message_id，无法继续更新");
             if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
 
-            markSessionIdle(session.id, sessions);
+            await markSessionIdle(session.id, sessions);
             return;
         }
 
@@ -145,10 +160,14 @@ startBot({
         // 让事件回调尽快返回，后续模拟更新在后台继续。
         void runCardDemo(bot, cardId, resolved, run.signal).catch((error) => {
             console.error("[卡片] 演示失败:", (error as Error).message);
-        }).finally(() => {
+        }).finally(async () => {
             if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
 
-            markSessionIdle(session.id, sessions);
+            try {
+                await markSessionIdle(session.id, sessions);
+            } catch (error) {
+                console.error('[会话] 保存空闲状态失败:', (error as Error).message);
+            }
         });
         // const replyId = await bot.reply(msg.messageId, `收到：${resolved}`, hasThread);
         // console.log(`[已回] message_id=${replyId} inThread=${hasThread}`);

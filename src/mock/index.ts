@@ -94,8 +94,8 @@ export async function runCardDemo(
     console.log("[卡片] 任务完成");
 }
 
-export function markSessionIdle(sessionId: string, sessions: SessionManager): void {
+export async function markSessionIdle(sessionId: string, sessions: SessionManager) {
     if (sessions.get(sessionId)?.status !== "active") return;
-    sessions.transition(sessionId, "idle");
+    await sessions.transition(sessionId, "idle");
     console.log(`[会话] id=${sessionId} status=idle`);
 }
