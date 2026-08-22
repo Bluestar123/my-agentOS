@@ -24,9 +24,10 @@ export function formatSessionStatus(session: Session): string {
         `会话：${session.id}`,
         `状态：${STATUS_LABELS[session.status]}`,
         `执行引擎：${session.cliId}`,
+        `CLI 会话：${session.cliSessionId ?? "(尚未建立)"}`,
         `话题：${session.threadId}`,
         `更新时间：${session.updatedAt}`,
-    ].join('\n');
+    ].join("\n");
 }
 
 /**

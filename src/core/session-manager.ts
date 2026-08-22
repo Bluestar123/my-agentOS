@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { SessionStore } from './session-store.js';
+import type { CliId } from "../cli/types.js";
 
-/** 支持的 AI 编程 CLI 引擎（当前只有 Claude Code，后续可加 codex） */
-export type CliId = 'claude';
+
 
 /**
  * 会话状态机四态：
@@ -12,6 +12,9 @@ export type CliId = 'claude';
  * - closed：已关闭（该话题不再响应，用户需新开话题）
  */
 export type SessionStatus = 'creating' | 'active' | 'idle' | 'closed';
+
+
+
 
 /** 一次会话的完整记录（内存与磁盘共用此结构） */
 export interface Session {
@@ -23,6 +26,7 @@ export interface Session {
     chatId: string;
     /** 负责执行任务的 CLI 引擎 */
     cliId: CliId;
+    cliSessionId?: string; // claude 的会话id，可选因为现在存的没有这个字段
     /** 当前状态 */
     status: SessionStatus;
     /** 创建时间（ISO 8601 字符串） */
@@ -202,4 +206,33 @@ export class SessionManager {
     private async persist(): Promise<void> {
         await this.store?.save([...this.sessions.values()]);
     }
+
+
+    async setCliSessionId(
+        sessionId: string, // agentos 的会话id
+        cliSessionId: string, // claude 的会话id
+    ): Promise<Session> {
+        const current = this.get(sessionId);
+        if (!current) throw new Error(`会话不存在: ${sessionId}`);
+        if (!cliSessionId) throw new Error("CLI 会话 ID 不能为空");
+
+        const updated: Session = {
+            ...current,
+            cliSessionId,
+            updatedAt: this.now().toISOString(),
+        };
+        const key = sessionKey(updated.chatId, updated.threadId);
+        this.sessions.set(key, updated);
+
+        try {
+            await this.persist();
+        } catch (error) {
+            // 落盘失败：回滚为旧状态, 避免磁盘没有clisessionid
+            if (this.sessions.get(key) === updated) this.sessions.set(key, current);
+            throw error;
+        }
+
+        return updated;
+    }
+
 }

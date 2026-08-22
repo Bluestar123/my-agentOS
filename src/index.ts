@@ -15,16 +15,21 @@
  */
 import 'dotenv/config';
 import { startBot, type Bot } from './im/lark.js';
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveMentions, extractResourceKeys } from "./im/message-parser.js";
 import { buildTaskCard } from './im/card.js';
 import { SessionManager } from "./core/session-manager.js";
 import { formatSessionStatus, markSessionIdle, runCardDemo } from './mock/index.js';
 import { parseCommand } from "./core/command-parser.js";
 import { JsonSessionStore } from "./core/session-store.js";
+import { runCli } from "./cli/runner.js";
+import { ClaudeAdapter } from './cli/claude-adapter.js';
 
 const appId = process.env.BOT_A_APP_ID;
 const appSecret = process.env.BOT_A_APP_SECRET;
+// 默认 agentos 目录
+const cliWorkdir = resolve(process.env.CLAUDE_WORKDIR ?? process.cwd());
+const cliAdapter = new ClaudeAdapter();
 
 if (!appId || !appSecret) {
     console.error('缺少 BOT_A_APP_ID / BOT_A_APP_SECRET，请检查 .env');
@@ -32,6 +37,7 @@ if (!appId || !appSecret) {
 }
 
 console.log('Agent OS 启动，正在建立飞书长连接…');
+console.log(`[CLI] command=${cliAdapter.command} cwd=${cliWorkdir}`);
 
 // 恢复历史会话：重启后能接着上次的话题继续对话
 const sessions = await SessionManager.open({
@@ -41,6 +47,17 @@ console.log(`[会话] 已恢复 ${sessions.size} 个会话`);
 
 // 正在执行的任务表：sessionId → AbortController，供 /close 命令中止后台任务
 const activeRuns = new Map<string, AbortController>();
+
+
+function executeCli(prompt: string, sessionId: string | undefined, signal: AbortSignal) {
+    return runCli({
+        adapter: cliAdapter,
+        prompt,
+        cwd: cliWorkdir,
+        signal,
+        sessionId
+    });
+}
 
 startBot({
     appId,
@@ -154,10 +171,10 @@ startBot({
             cardId = await bot.replyCard(
                 msg.messageId,
                 buildTaskCard({
-                    title: "Agent OS 模拟任务",
+                    title: "Claude Code 模拟任务",
                     status: "running",
                     progress: 0,
-                    detail: "正在准备任务环境",
+                    detail: "正在启动执行引擎",
                 }),
                 hasThread,
             );
@@ -180,23 +197,78 @@ startBot({
 
         console.log(`[卡片] 已发送 message_id=${cardId} inThread=${hasThread}`);
 
+        // 上面创建初始卡片，下面开始执行任务，更新状态
+        void executeCli(resolved, session.cliSessionId, run.signal)
+            // result 是 claude 返回的结果
+            .then(async (result) => {
+                if (result.sessionId && result.sessionId !== session.cliSessionId) {
+                    await sessions.setCliSessionId(session.id, result.sessionId);
+                }
+                // 完成时先把卡片更新到 100%，再把 result.answer 回复到原消息所在的话题
+                await bot.updateCard(
+                    cardId,
+                    buildTaskCard({
+                        title: "Claude Code 任务",
+                        status: "success",
+                        progress: 100,
+                        detail: "执行完成",
+                    }),
+                );
+                await bot.reply(msg.messageId, result.answer, hasThread);
+                console.log(`[CLI] 完成，claude session_id=${result.sessionId ?? "(无)"}`);
+            })
+            .catch(async (error) => {
+                if (run.signal.aborted) {
+                    console.log("[CLI] 任务已取消");
+                    return;
+                }
+                const message = (error as Error).message;
+                console.error("[CLI] 执行失败:", message);
+                await bot.updateCard(
+                    cardId,
+                    buildTaskCard({
+                        title: "Claude Code 任务",
+                        status: "failed",
+                        progress: 0,
+                        detail: message,
+                    }),
+                );
+                await bot.reply(
+                    msg.messageId,
+                    `Claude Code 执行失败：${message}`,
+                    hasThread,
+                );
+            })
+            .finally(async () => {
+                if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
+                try {
+                    await markSessionIdle(session.id, sessions);
+                } catch (error) {
+                    console.error("[会话] 保存空闲状态失败:", (error as Error).message);
+                }
+            })
+            // 这个 catch 用于接住卡片更新或状态持久化自身的异常，
+            // 避免后台出现 Unhandled Promise rejection
+            .catch((error) => {
+                console.error("[任务] 回传或收尾失败:", (error as Error).message);
+            });
 
 
         // 后台模拟执行：让事件回调尽快返回（否则飞书长连接会排队积压），
         // 进度通过 updateCard 持续刷新卡片；finally 里统一收尾。
-        void runCardDemo(bot, cardId, resolved, run.signal).catch((error) => {
-            console.error("[卡片] 演示失败:", (error as Error).message);
-        }).finally(async () => {
-            // 任务结束：无论成功/失败/中止，都摘除运行句柄，会话回到 idle
-            // 如果需要继续对话，上面会重新设置
-            if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
+        // void runCardDemo(bot, cardId, resolved, run.signal).catch((error) => {
+        //     console.error("[卡片] 演示失败:", (error as Error).message);
+        // }).finally(async () => {
+        //     // 任务结束：无论成功/失败/中止，都摘除运行句柄，会话回到 idle
+        //     // 如果需要继续对话，上面会重新设置
+        //     if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
 
-            try {
-                await markSessionIdle(session.id, sessions);
-            } catch (error) {
-                console.error('[会话] 保存空闲状态失败:', (error as Error).message);
-            }
-        });
+        //     try {
+        //         await markSessionIdle(session.id, sessions);
+        //     } catch (error) {
+        //         console.error('[会话] 保存空闲状态失败:', (error as Error).message);
+        //     }
+        // });
         // const replyId = await bot.reply(msg.messageId, `收到：${resolved}`, hasThread);
         // console.log(`[已回] message_id=${replyId} inThread=${hasThread}`);
 

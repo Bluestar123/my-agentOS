@@ -90,36 +90,43 @@ export interface Bot {
     updateCard: (messageId: string, card: CardJson) => Promise<void>;
 }
 
-/**
- * 解析飞书消息内容，统一提取纯文本
- * @param messageType 消息类型
- * @param content 飞书原始content字符串（JSON）
- * @returns 提取出的纯文本
- */
-function extractText(messageType: string, content: string): string {
-    // 解析飞书标准content JSON
+interface PostElement {
+    tag?: string;
+    text?: string;
+    user_id?: string;
+}
+
+function renderPostElement(element: PostElement): string {
+    if (element.tag === "at") return element.user_id ?? "";
+    if (element.tag === "br") return "\n";
+    if (["text", "a", "code", "code_block", "md"].includes(element.tag ?? "")) {
+        return element.text ?? "";
+    }
+    return "";
+}
+
+export function extractMessageText(
+    messageType: string,
+    content: string,
+): string {
     const parsed = JSON.parse(content);
 
-    // 普通文本消息
-    if (messageType === 'text') {
-        return parsed.text ?? '';
+    if (messageType === "text") {
+        return parsed.text ?? "";
     }
 
-    // Post富文本消息（飞书图文、换行、链接富文本）
-    if (messageType === 'post') {
-        // post结构：content是二维数组 [[元素1,元素2], [第二行元素]]
-        const paragraphs: any[][] = parsed.content ?? [];
+    if (messageType === "post") {
+        const paragraphs: PostElement[][] = parsed.content ?? [];
         return paragraphs
-            .flat() // 二维数组扁平化
-            .filter((el) => el.tag === 'text') // 只筛选文本标签
-            .map((el) => el.text)
-            .join('')
+            .map((paragraph) => paragraph.map(renderPostElement).join(""))
+            .filter(Boolean)
+            .join("\n")
             .trim();
     }
 
-    // image/file/sticker等其他类型消息，暂时返回空文本
-    return '';
+    return "";
 }
+
 
 
 
@@ -256,7 +263,7 @@ export function startBot(opts: BotOptions): Bot {
                 chatId: m.chat_id,
                 chatType: m.chat_type,
                 messageType: m.message_type,
-                text: extractText(m.message_type, m.content),
+                text: extractMessageText(m.message_type, m.content),
                 senderOpenId: data.sender.sender_id?.open_id ?? '',
                 rootId: m.root_id ?? '',
                 threadId: m.thread_id ?? '',
