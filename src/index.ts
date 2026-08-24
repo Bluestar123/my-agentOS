@@ -17,13 +17,15 @@ import 'dotenv/config';
 import { startBot, type Bot } from './im/lark.js';
 import { join, resolve } from "node:path";
 import { resolveMentions, extractResourceKeys } from "./im/message-parser.js";
-import { buildTaskCard } from './im/card.js';
+import { answerContinuation, answerNeedsContinuation, buildTaskCard, splitLongText, ThrottledCardUpdater } from './im/card.js';
 import { SessionManager } from "./core/session-manager.js";
-import { formatSessionStatus, markSessionIdle, runCardDemo } from './mock/index.js';
+import { formatSessionStatus, markSessionIdle } from './mock/index.js';
 import { parseCommand } from "./core/command-parser.js";
 import { JsonSessionStore } from "./core/session-store.js";
+import { TaskProgressTracker } from "./core/task-progress.js";
 import { runCli } from "./cli/runner.js";
 import { ClaudeAdapter } from './cli/claude-adapter.js';
+import { requestTaskAbort, type ActiveRun } from "./core/task-abort.js";
 
 const appId = process.env.BOT_A_APP_ID;
 const appSecret = process.env.BOT_A_APP_SECRET;
@@ -46,22 +48,49 @@ const sessions = await SessionManager.open({
 console.log(`[会话] 已恢复 ${sessions.size} 个会话`);
 
 // 正在执行的任务表：sessionId → AbortController，供 /close 命令中止后台任务
-const activeRuns = new Map<string, AbortController>();
+const activeRuns = new Map<string, ActiveRun>();
+const contextWindows = new Map<string, number>();
 
-
-function executeCli(prompt: string, sessionId: string | undefined, signal: AbortSignal) {
+function executeCli(prompt: string, sessionId: string | undefined, signal: AbortSignal,
+    onEvent: Parameters<typeof runCli>[0]["onEvent"],
+) {
     return runCli({
         adapter: cliAdapter,
         prompt,
         cwd: cliWorkdir,
         signal,
-        sessionId
+        sessionId,
+        onEvent
     });
 }
 
 startBot({
     appId,
     appSecret,
+    onCardAction: async (action) => {
+        if (action.value.action !== "abort_task") return undefined;
+        const sessionId =
+            typeof action.value.sessionId === "string" ? action.value.sessionId : "";
+        const outcome = requestTaskAbort(
+            activeRuns,
+            sessionId,
+            action.operatorOpenId,
+        );
+        if (outcome === "not_found") {
+            return {
+                toast: { type: "info", content: "任务已经结束，无需再次停止。" },
+            };
+        }
+        if (outcome === "forbidden") {
+            return {
+                toast: { type: "warning", content: "只有任务发起人可以停止它。" },
+            };
+        }
+        if (outcome === "already_stopping") {
+            return { toast: { type: "info", content: "正在停止任务，请稍候。" } };
+        }
+        return { toast: { type: "success", content: "已发送停止指令。" } };
+    },
     onMessage: async (msg, bot) => {
         // 还原 @占位符：把 "@_user_1" 换成 "@显示名"；
         // 将来 bot 想 @某个真人（例如危险操作需要真人拍板）时，靠 mentions 定位真实 open_id
@@ -101,8 +130,12 @@ startBot({
             return;
         }
         if (command?.name === 'close') {
-            // 中止该会话正在跑的后台任务（runCardDemo 的 wait 会立即退出）
-            activeRuns.get(session.id)?.abort();
+            // 中止该会话正在跑的后台任务
+            const active = activeRuns.get(session.id);
+            if (active) {
+                active.cancelMode = "close";
+                active.controller.abort();
+            }
             if (session.status !== 'closed') {
                 await sessions.transition(session.id, 'closed')
             }
@@ -148,7 +181,11 @@ startBot({
 
         // 登记中止句柄：/close 命令可中止本次后台任务
         const run = new AbortController();
-        activeRuns.set(session.id, run);
+        const activeRun: ActiveRun = {
+            controller: run,
+            ownerOpenId: msg.senderOpenId, // 会话发起人
+        };
+        activeRuns.set(session.id, activeRun);
 
 
         // 获取并下载图片/文件资源到 data/downloads/（image_key / file_key）
@@ -173,14 +210,15 @@ startBot({
                 buildTaskCard({
                     title: "Claude Code 模拟任务",
                     status: "running",
-                    progress: 0,
                     detail: "正在启动执行引擎",
+                    abortSessionId: session.id,
                 }),
                 hasThread,
             );
         } catch (error) {
             // 发卡片失败：任务无法继续，清理运行句柄并让会话回到 idle
-            if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
+            if (activeRuns.get(session.id)?.controller === run)
+                activeRuns.delete(session.id);
             // 改成 idle，后面可以继续
             await markSessionIdle(session.id, sessions);
             throw error;
@@ -189,58 +227,115 @@ startBot({
         if (!cardId) {
             // 飞书响应里没有 message_id：同样无法更新卡片，收尾退出
             console.error("[卡片] 响应里没有 message_id，无法继续更新");
-            if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
+            if (activeRuns.get(session.id)?.controller === run)
+                activeRuns.delete(session.id);
 
             await markSessionIdle(session.id, sessions);
             return;
         }
 
         console.log(`[卡片] 已发送 message_id=${cardId} inThread=${hasThread}`);
+        const progress = new TaskProgressTracker(
+            Date.now,
+            contextWindows.get(session.id),
+            !session.cliSessionId
+        );
 
-        // 上面创建初始卡片，下面开始执行任务，更新状态
-        void executeCli(resolved, session.cliSessionId, run.signal)
+        const cardUpdater = new ThrottledCardUpdater((card) =>
+            bot.updateCard(cardId, card),
+        );
+        const renderProgress = () => {
+            const snapshot = progress.snapshot();
+            cardUpdater.push(
+                buildTaskCard({
+                    title: "Claude Code",
+                    status: "running",
+                    detail: snapshot.current,
+                    progress: snapshot,
+                    abortSessionId: session.id,
+                }),
+            );
+        };
+        const progressHeartbeat = setInterval(renderProgress, 1_000);
+        progressHeartbeat.unref();
+
+        // 让事件回调尽快返回，Claude Code 在后台继续执行。
+        void executeCli(resolved, session.cliSessionId, run.signal, (event) => {
+            if (
+                event.type !== "tool_start" &&
+                event.type !== "tool_end" &&
+                event.type !== "context"
+            )
+                return;
+
+            progress.accept(event);
+            renderProgress();
+        })
             // result 是 claude 返回的结果
             .then(async (result) => {
+                clearInterval(progressHeartbeat);
+                // 执行完 有了 claude 会话 id，在设置
                 if (result.sessionId && result.sessionId !== session.cliSessionId) {
                     await sessions.setCliSessionId(session.id, result.sessionId);
                 }
-                // 完成时先把卡片更新到 100%，再把 result.answer 回复到原消息所在的话题
-                await bot.updateCard(
-                    cardId,
+                if (result.stats?.contextWindowTokens) {
+                    contextWindows.set(session.id, result.stats.contextWindowTokens);
+                }
+                const snapshot = progress.snapshot();
+                await cardUpdater.finish(
                     buildTaskCard({
-                        title: "Claude Code 任务",
+                        title: "Claude Code",
                         status: "success",
-                        progress: 100,
                         detail: "执行完成",
+                        progress: snapshot,
+                        answer: result.answer,
+                        stats: result.stats,
+                        recipientOpenId: msg.senderOpenId,
                     }),
                 );
-                await bot.reply(msg.messageId, result.answer, hasThread);
-                console.log(`[CLI] 完成，claude session_id=${result.sessionId ?? "(无)"}`);
+                if (answerNeedsContinuation(result.answer)) {
+                    for (const chunk of splitLongText(
+                        answerContinuation(result.answer),
+                    )) {
+                        await bot.reply(msg.messageId, chunk, hasThread);
+                    }
+                }
+                console.log(`[CLI] 完成 session_id=${result.sessionId ?? "(无)"}`);
             })
             .catch(async (error) => {
+                clearInterval(progressHeartbeat);
                 if (run.signal.aborted) {
                     console.log("[CLI] 任务已取消");
+                    await cardUpdater.finish(
+                        buildTaskCard({
+                            title: "Claude Code",
+                            status: "cancelled",
+                            detail:
+                                activeRun.cancelMode === "close"
+                                    ? "本次任务已停止，当前会话已经关闭。"
+                                    : "本次任务已停止。你可以继续在当前话题里提问。",
+                            progress: progress.snapshot(),
+                        }),
+                    );
                     return;
                 }
                 const message = (error as Error).message;
                 console.error("[CLI] 执行失败:", message);
-                await bot.updateCard(
-                    cardId,
+                await cardUpdater.finish(
                     buildTaskCard({
-                        title: "Claude Code 任务",
+                        title: "Claude Code",
                         status: "failed",
-                        progress: 0,
-                        detail: message,
+                        detail: "执行没有完成。你可以调整指令后，在当前话题里重试。",
+                        technicalDetail: message,
+                        progress: progress.snapshot(),
                     }),
-                );
-                await bot.reply(
-                    msg.messageId,
-                    `Claude Code 执行失败：${message}`,
-                    hasThread,
                 );
             })
             .finally(async () => {
-                if (activeRuns.get(session.id) === run) activeRuns.delete(session.id);
+                clearInterval(progressHeartbeat);
+                if (activeRuns.get(session.id)?.controller === run) {
+                    activeRuns.delete(session.id);
+                }
                 try {
                     await markSessionIdle(session.id, sessions);
                 } catch (error) {

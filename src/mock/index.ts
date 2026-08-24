@@ -72,51 +72,50 @@ export const DEMO_STEPS = [
  * @param resolved 还原 @ 后的用户原始指令（展示在最终卡片上）
  * @param signal 中止信号（来自 activeRuns 的 AbortController）
  */
-export async function runCardDemo(
-    bot: Bot,
-    cardId: string,
-    resolved: string,
-    signal: AbortSignal,
-): Promise<void> {
-    const activities: string[] = []; // 动作历史，卡片上只展示最近 3 条
-    const updater = new ThrottledCardUpdater(async (card) => {
-        await bot.updateCard(cardId, card);
-        console.log("[卡片] 已刷新");
-    });
+// export async function runCardDemo(
+//     bot: Bot,
+//     cardId: string,
+//     resolved: string,
+//     signal: AbortSignal,
+// ): Promise<void> {
+//     const activities: string[] = []; // 动作历史，卡片上只展示最近 3 条
+//     const updater = new ThrottledCardUpdater(async (card) => {
+//         await bot.updateCard(cardId, card);
+//         console.log("[卡片] 已刷新");
+//     });
 
-    for (const [index, step] of DEMO_STEPS.entries()) {
-        // 每步等 700ms；/close 触发 abort 时立即退出
-        if (!await wait(700, signal)) {
-            await updater.cancel();
-            console.log("[卡片] 已取消");
-            return
-        }
-        activities.push(step);
-        const progress = Math.round(((index + 1) / DEMO_STEPS.length) * 90); // 上限 90%，留 10% 给收尾
-        console.log(`[进度] ${progress}% ${step}`);
-        updater.push(
-            buildTaskCard({
-                title: "Agent OS 模拟任务",
-                status: "running",
-                progress,
-                detail: step,
-                activities: activities.slice(-3),
-            }),
-        );
-    }
+//     for (const [index, step] of DEMO_STEPS.entries()) {
+//         // 每步等 700ms；/close 触发 abort 时立即退出
+//         if (!await wait(700, signal)) {
+//             await updater.cancel();
+//             console.log("[卡片] 已取消");
+//             return
+//         }
+//         activities.push(step);
+//         const progress = Math.round(((index + 1) / DEMO_STEPS.length) * 90); // 上限 90%，留 10% 给收尾
+//         console.log(`[进度] ${progress}% ${step}`);
+//         updater.push(
+//             buildTaskCard({
+//                 title: "Agent OS 模拟任务",
+//                 status: "running",
+//                 detail: step,
+//                 activities: activities.slice(-3),
+//             }),
+//         );
+//     }
 
-    // 全部步骤完成：强制发最终"已完成"卡片，关闭更新器
-    await updater.finish(
-        buildTaskCard({
-            title: "Agent OS 模拟任务",
-            status: "success",
-            progress: 100,
-            detail: `已处理：${resolved || "富媒体消息"}`,
-            activities: activities.slice(-3),
-        }),
-    );
-    console.log("[卡片] 任务完成");
-}
+//     // 全部步骤完成：强制发最终"已完成"卡片，关闭更新器
+//     await updater.finish(
+//         buildTaskCard({
+//             title: "Agent OS 模拟任务",
+//             status: "success",
+//             progress: 100,
+//             detail: `已处理：${resolved || "富媒体消息"}`,
+//             activities: activities.slice(-3),
+//         }),
+//     );
+//     console.log("[卡片] 任务完成");
+// }
 
 /**
  * 把会话标记为空闲（任务收尾时调用）：

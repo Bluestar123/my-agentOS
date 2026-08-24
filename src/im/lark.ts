@@ -1,93 +1,108 @@
 /**
- * 飞书机器人封装
- * 实现方案：WS长连接订阅飞书事件 + REST接口回复消息
- * 优势：无需公网域名、不用配置HTTPS回调地址，本地/内网直接调试机器人
- * 依赖包：@larksuiteoapi/node-sdk
+ * 飞书接入：WS 长连接收消息 + REST 回消息。
+ *
+ * 事件链路：
+ * - im.message.receive_v1：用户发消息 → WS 推送 → 标准化为 IncomingMessage → 交给 onMessage
+ * - card.action.trigger：用户点击卡片按钮 → WS 推送 → 解析为 CardAction → 交给 onCardAction
+ *
+ * 回消息方式：
+ * - reply / replyCard：回复一条新消息（文本或交互卡片）
+ * - updateCard：原地更新已发出的卡片（进度刷新靠它，需要卡片 config.update_multi=true）
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
-import { parseMentions, type Mention } from "./message-parser.js";
-import { mkdir } from "node:fs/promises";
-import { extname, join } from "node:path";
-import type { CardJson } from "./card.js";
+import { mkdir } from 'node:fs/promises';
+import { extname, join } from 'node:path';
+import { parseMentions, type Mention } from './message-parser.js';
+import type { CardJson } from './card.js';
 
-
-/**
- * 收到的飞书消息标准化结构
- */
 export interface IncomingMessage {
-    /** 消息唯一ID，回复消息必须携带此ID */
     messageId: string;
-    /** 会话ID：单聊/群聊唯一标识 */
     chatId: string;
-    /** 会话类型 p2p=单聊 group=群聊 */
     chatType: string;
-    /** 消息类型 text文本 / post富文本 / image图片 等 */
     messageType: string;
-    /** 提取之后的纯文本内容，非文本消息为空字符串 */
     text: string;
-    /** 发送者open_id，飞书用户唯一标识 */
+    rootId: string;
+    threadId: string;
     senderOpenId: string;
-    rootId: string; //root_id 则指向话题的根消息：根消息自己的 root_id 为空，后续回复的 root_id 是根消息的 message_id
-    threadId: string; //thread_id 标记话题本身，同一话题里的消息共享这个 ID
-
-    // IncomingMessage 内
     mentions: Mention[];
-
-    // 图片文件资源
-    // { "image_key": "img_v3_xxx" }
-    //{ "file_key": "file_v3_xxx", "file_name": "report.xlsx" }
     rawContent: string;
 }
 
-/**
- * 机器人启动入参配置
- */
 export interface BotOptions {
-    /** 飞书开放平台应用 AppID */
     appId: string;
-    /** 飞书开放平台应用 AppSecret */
     appSecret: string;
-    /**
-     * 消息回调函数
-     * @param msg 标准化后的消息对象
-     * @param bot 机器人实例，内置reply回复方法
-     */
     onMessage: (msg: IncomingMessage, bot: Bot) => Promise<void>;
+    onCardAction?: (action: CardAction) => Promise<CardActionResponse | undefined>;
+}
+
+export interface CardAction {
+    /** 点击按钮的飞书用户 open_id（服务端可用它做权限校验） */
+    operatorOpenId: string;
+    /** 卡片所在消息的 message_id（需要时可用 updateCard 同步刷新这张卡片） */
+    messageId: string;
+    /** 按钮自定义参数：按钮 behaviors 里声明的 value 原样透传，业务靠它区分动作 */
+    value: Record<string, unknown>;
+}
+
+export interface CardActionResponse {
+    toast?: { type: 'success' | 'info' | 'warning' | 'error'; content: string };
+    card?: { type: 'raw'; data: CardJson };
 }
 
 /**
- * Bot对外暴露实例类型
+ * 解析飞书卡片回调事件（card.action.trigger）：
+ * 从原始载荷中提取操作者 open_id、消息 ID 与按钮自定义参数 value。
+ * 兼容新旧两种载荷结构（新版在 operator 下，旧版在 operator_id 下），取不到就给空值兜底。
  */
+export function parseCardAction(data: any): CardAction {
+    const value = data?.action?.value;
+    return {
+        operatorOpenId: data?.operator?.open_id
+            ?? data?.operator_id?.open_id
+            ?? '',
+        messageId: data?.context?.open_message_id
+            ?? data?.open_message_id
+            ?? '',
+        value: isRecord(value) ? value : {},
+    };
+}
+
 export interface Bot {
-    /** 飞书原始SDK Client，可自行调用其他飞书接口 */
     client: Lark.Client;
-    /**
-     * 快捷回复消息
-     * @param messageId 原始消息id
-     * @param text 需要发送的文本内容
-     * @returns 返回新生成的消息ID，发送失败返回undefined
-     */
     reply: (messageId: string, text: string, replyInThread?: boolean) => Promise<string | undefined>;
-    /**
-     * 下载图片文件并保存到本地
-     * @param messageId 消息ID
-     * @param fileKey 文件key，例如 image_key / file_key
-     * @param type 文件类型 image/file
-     * @param saveDir 保存目录
-     * @param fileName 保存文件名，可选
-     * @returns 保存路径
-     */
+    replyCard: (messageId: string, card: CardJson, replyInThread?: boolean) => Promise<string | undefined>;
+    updateCard: (messageId: string, card: CardJson) => Promise<void>;
     downloadResource: (
         messageId: string,
         fileKey: string,
-        type: "image" | "file",
+        type: 'image' | 'file',
         saveDir: string,
         fileName?: string,
     ) => Promise<string>;
+}
 
-    replyCard: (messageId: string, card: CardJson, replyInThread?: boolean) =>
-        Promise<string | undefined>;
-    updateCard: (messageId: string, card: CardJson) => Promise<void>;
+const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/x-icon': 'ico',
+};
+
+function getHeader(headers: any, name: string): string {
+    const value = typeof headers?.get === 'function'
+        ? headers.get(name)
+        : headers?.[name] ?? headers?.[name.toLowerCase()];
+    return Array.isArray(value) ? (value[0] ?? '') : (value ?? '');
+}
+
+function resourceExtension(type: 'image' | 'file', fileName: string | undefined, contentType: string): string {
+    const original = fileName ? extname(fileName).slice(1).toLowerCase() : '';
+    if (/^[a-z0-9]{1,10}$/.test(original)) return original;
+
+    const mime = contentType.split(';', 1)[0].trim().toLowerCase();
+    return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === 'image' ? 'img' : 'bin');
 }
 
 interface PostElement {
@@ -96,124 +111,77 @@ interface PostElement {
     user_id?: string;
 }
 
+// 富文本每个段落处理
 function renderPostElement(element: PostElement): string {
-    if (element.tag === "at") return element.user_id ?? "";
-    if (element.tag === "br") return "\n";
-    if (["text", "a", "code", "code_block", "md"].includes(element.tag ?? "")) {
-        return element.text ?? "";
+    if (element.tag === 'at') return element.user_id ?? '';
+    if (element.tag === 'br') return '\n';
+    if (['text', 'a', 'code', 'code_block', 'md'].includes(element.tag ?? '')) {
+        return element.text ?? '';
     }
-    return "";
+    return '';
 }
 
-export function extractMessageText(
-    messageType: string,
-    content: string,
-): string {
+/** 从消息 JSON 内容中提取纯文本：text 直接取，post 富文本把各段落元素拼接成文本 */
+export function extractMessageText(messageType: string, content: string): string {
     const parsed = JSON.parse(content);
-
-    if (messageType === "text") {
-        return parsed.text ?? "";
+    if (messageType === 'text') {
+        return parsed.text ?? '';
     }
-
-    if (messageType === "post") {
+    if (messageType === 'post') {
         const paragraphs: PostElement[][] = parsed.content ?? [];
         return paragraphs
-            .map((paragraph) => paragraph.map(renderPostElement).join(""))
+            .map((paragraph) => paragraph.map(renderPostElement).join(''))
             .filter(Boolean)
-            .join("\n")
+            .join('\n')
             .trim();
     }
-
-    return "";
+    return '';
 }
 
-
-
-
-
-
-// 常见图片 MIME 类型 → 文件扩展名映射表（下载资源时推断扩展名用）
-const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/gif": "gif",
-    "image/webp": "webp",
-    "image/bmp": "bmp",
-    "image/x-icon": "ico",
-};
-
-/**
- * 从响应头中安全取值：
- * 兼容 Headers 对象（有 .get 方法）和普通对象（大小写两种键都尝试）
- */
-function getHeader(headers: any, name: string): string {
-    const value =
-        typeof headers?.get === "function"
-            ? headers.get(name)
-            : (headers?.[name] ?? headers?.[name.toLowerCase()]);
-    return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
-}
-
-/**
- * 确定下载文件的扩展名，优先级：
- * 1. 原始文件名自带合法扩展名（如 report.xlsx → xlsx）
- * 2. 响应头 Content-Type 映射（如 image/png → png）
- * 3. 兜底：图片用 img，其他用 bin
- */
-function resourceExtension(
-    type: "image" | "file",
-    fileName: string | undefined,
-    contentType: string,
-): string {
-    // 原始文件名中的扩展名（限定为 1-10 位字母数字，防止路径注入）
-    const original = fileName ? extname(fileName).slice(1).toLowerCase() : "";
-    if (/^[a-z0-9]{1,10}$/.test(original)) return original;
-
-    // 按 Content-Type 映射
-    const mime = contentType.split(";", 1)[0].trim().toLowerCase();
-    return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === "image" ? "img" : "bin");
-}
-
-
-
-
-
-/**
- * 启动飞书机器人（WS长连接模式）
- * @param opts 机器人配置参数
- * @returns Bot实例
- */
 export function startBot(opts: BotOptions): Bot {
-    const { appId, appSecret, onMessage } = opts;
+    const { appId, appSecret, onMessage, onCardAction } = opts;
 
-    // 初始化飞书SDK客户端，用于调用REST API（发消息、获取用户信息等）
     const client = new Lark.Client({ appId, appSecret });
 
-    // 构造对外暴露的Bot实例
     const bot: Bot = {
         client,
-        // replyInThread 归入你指定的 thread_id 话题里，作为这个话题下的一条回复
-        async reply(messageId: string, text: string, replyInThread = false) {
-            try {
-                // 调用飞书消息回复接口
-                const res = await client.im.v1.message.reply({
-                    path: { message_id: messageId },
-                    // content必须序列化字符串，飞书接口规范要求
-                    data: {
-                        msg_type: 'text',
-                        content: JSON.stringify({ text }),
-                        ...(replyInThread ? { reply_in_thread: true } : {})
-                    },
-                });
-                return res.data?.message_id;
-            } catch (err) {
-                // 消息发送异常直接返回undefined，上层可捕获处理
-                console.error('[飞书] 回复消息失败：', err);
-                return undefined;
-            }
+
+        // 回复一条纯文本消息；replyInThread=true 时作为话题内回复发出
+        async reply(messageId, text, replyInThread = false) {
+            const res = await client.im.v1.message.reply({
+                path: { message_id: messageId },
+                data: {
+                    msg_type: 'text',
+                    content: JSON.stringify({ text }),
+                    ...(replyInThread ? { reply_in_thread: true } : {}),
+                },
+            });
+            return res.data?.message_id;
         },
+
+        // 回复一张交互卡片（msg_type=interactive），返回新卡片的 message_id 供后续 updateCard
+        async replyCard(messageId, card, replyInThread = false) {
+            const res = await client.im.v1.message.reply({
+                path: { message_id: messageId },
+                data: {
+                    msg_type: 'interactive', // 交互卡片
+                    content: JSON.stringify(card),
+                    ...(replyInThread ? { reply_in_thread: true } : {}),
+                },
+            });
+            return res.data?.message_id;
+        },
+
+        // 原地更新已发出的卡片（不产生新消息），进度刷新 / 最终收尾都走这里
+        async updateCard(messageId, card) {
+            await client.im.v1.message.patch({
+                path: { message_id: messageId },
+                data: { content: JSON.stringify(card) },
+            });
+        },
+
+        // 下载消息中的图片 / 文件资源，按文件扩展名或 Content-Type 推断后缀并落盘，返回保存路径
         async downloadResource(messageId, fileKey, type, saveDir, fileName) {
-            //返回响应头和一个 writeFile 方法。目录不存在时，mkdir 会递归创建，方法最后返回实际保存路径
             const res = await client.im.v1.messageResource.get({
                 path: { message_id: messageId, file_key: fileKey },
                 params: { type },
@@ -225,64 +193,40 @@ export function startBot(opts: BotOptions): Bot {
             await res.writeFile(savePath);
             return savePath;
         },
-        async replyCard(messageId, card, replyInThread = false) {
-            const res = await client.im.v1.message.reply({
-                path: { message_id: messageId },
-                data: {
-                    msg_type: 'interactive', // 卡片消息
-                    content: JSON.stringify(card),
-                    ...(replyInThread ? { reply_in_thread: true } : {}),
-                },
-            });
-            return res.data?.message_id;
-        },
-        async updateCard(messageId, card) {
-            await client.im.v1.message.patch({
-                path: { message_id: messageId },
-                data: { content: JSON.stringify(card) },
-            });
-        },
-
-
     };
 
-    // 事件分发器：注册需要监听的飞书事件
     const dispatcher = new Lark.EventDispatcher({}).register({
-        /**
-         * 核心事件：im.message.receive_v1
-         * 机器人收到用户消息触发
-         * 注意：飞书后台需要开通【消息与事件接收】权限
-         */
+        // 卡片按钮点击事件：解析成 CardAction 后交给业务回调；
+        // 返回值中的 toast / card 会由飞书 SDK 回写（如「已发送停止指令」的提示条）
+        'card.action.trigger': async (data: any) => {
+            if (!onCardAction) return undefined;
+            return onCardAction(parseCardAction(data));
+        },
+        // 收到用户消息：标准化为 IncomingMessage 后交给业务回调
         'im.message.receive_v1': async (data) => {
-            // data为飞书原始事件载荷
             const m = data.message;
-
-            // 组装标准化消息结构体，屏蔽飞书原始复杂结构
             const msg: IncomingMessage = {
                 messageId: m.message_id,
                 chatId: m.chat_id,
                 chatType: m.chat_type,
                 messageType: m.message_type,
                 text: extractMessageText(m.message_type, m.content),
-                senderOpenId: data.sender.sender_id?.open_id ?? '',
                 rootId: m.root_id ?? '',
                 threadId: m.thread_id ?? '',
+                senderOpenId: data.sender.sender_id?.open_id ?? '',
                 mentions: parseMentions(m.mentions),
                 rawContent: m.content,
             };
-
-            // 执行业务回调逻辑
             await onMessage(msg, bot);
         },
     });
 
-    // 创建WS长连接客户端
-    // 原理：主动向外建立websocket长轮询，飞书服务端通过通道推送事件
-    // 无需配置请求地址、无需公网，适合本地开发、内网服务
     const wsClient = new Lark.WSClient({ appId, appSecret });
-    // 启动长连接，绑定事件分发器
     wsClient.start({ eventDispatcher: dispatcher });
 
-    // 返回bot实例，外部可以保存调用reply/client能力
     return bot;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
 }
