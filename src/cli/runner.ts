@@ -49,6 +49,8 @@ export function runCli(options: RunCliOptions): Promise<CliRunResult> {
         signal?.addEventListener('abort', () => killCli(child), { once: true });
         const lines = createInterface({ input: child.stdout });
         let observedSessionId = sessionId;
+        let observedAnswer: string | undefined;
+        let observedStats: CliRunResult['stats'];
         let finalResult: CliRunResult | undefined;
         let resultError: Error | undefined;
         let stderr = '';
@@ -79,11 +81,15 @@ export function runCli(options: RunCliOptions): Promise<CliRunResult> {
                     continue;
                 }
                 if (event.type === 'result') {
+                    if (event.answer) observedAnswer = event.answer;
+                    if (event.stats) observedStats = event.stats;
+                    if (!observedAnswer) continue;
                     finalResult = {
-                        answer: event.answer,
+                        answer: observedAnswer,
                         sessionId: event.sessionId ?? observedSessionId,
-                        ...(event.stats ? { stats: event.stats } : {}),
+                        ...(observedStats ? { stats: observedStats } : {}),
                     };
+
                 }
             }
         });

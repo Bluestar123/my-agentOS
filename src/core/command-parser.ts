@@ -10,6 +10,8 @@
  * （群聊里先 @ 机器人再发命令时，文本形如 "@MyBot /status"）。
  */
 
+import { CliId } from "../cli/types";
+
 /** 当前支持的命令名 */
 export type CommandName = 'close' | 'status' | 'help';
 
@@ -27,6 +29,7 @@ export interface SlashCommand {
  * 因此 "/status 给我看看" 这类带尾缀的文本不会被误判为命令。
  */
 const COMMAND_RE = /^(?:@.+\s+)?\/(close|status|help)\s*$/;
+const CLI_REQUEST_RE = /^(?:@\S+\s+)?\/(claude|codex)(?:\s+([\s\S]*))?$/;
 
 /**
  * 从用户消息纯文本中解析斜杠命令
@@ -37,4 +40,19 @@ export function parseCommand(text: string): SlashCommand | undefined {
     const match = COMMAND_RE.exec(text.trim());
     if (!match) return undefined;
     return { name: match[1] as CommandName };
+}
+
+
+export interface CliRequest {
+    cliId: CliId;
+    prompt: string;
+}
+
+export function parseCliRequest(text: string): CliRequest | undefined {
+    const match = CLI_REQUEST_RE.exec(text.trim());
+    if (!match) return undefined;
+    return {
+        cliId: match[1] as CliId,
+        prompt: (match[2] ?? '').trim(),
+    };
 }

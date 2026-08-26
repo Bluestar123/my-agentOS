@@ -1,4 +1,4 @@
-export type CliId = "claude";
+export type CliId = "claude" | 'codex';
 
 export type CliPromptInput = "argument" | "stdin";
 

@@ -5,6 +5,7 @@
  * 现阶段用一段"假装在干活"的模拟任务打通全链路：
  * 收到消息 → 发任务卡片 → 分步推进进度 → 刷新卡片 → 完成收尾。
  */
+import { getCliAdapter } from "../cli/registry.js";
 import { SessionManager, type Session } from "../core/session-manager.js";
 import { buildTaskCard, ThrottledCardUpdater } from "../im/card.js";
 
@@ -20,10 +21,11 @@ export const STATUS_LABELS: Record<Session['status'], string> = {
 
 /** 格式化会话状态文本，用于 /status 命令回复 */
 export function formatSessionStatus(session: Session): string {
+    const adapter = getCliAdapter(session.cliId);
     return [
         `会话：${session.id}`,
         `状态：${STATUS_LABELS[session.status]}`,
-        `执行引擎：${session.cliId}`,
+        `执行引擎：${adapter.displayName}`,
         `CLI 会话：${session.cliSessionId ?? "(尚未建立)"}`,
         `话题：${session.threadId}`,
         `更新时间：${session.updatedAt}`,
