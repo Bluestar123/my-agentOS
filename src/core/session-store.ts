@@ -15,6 +15,7 @@ export interface SessionStore {
  */
 const SessionSchema = z.object({
     id: z.string().min(1),
+    botId: z.string().min(1),
     threadId: z.string().min(1),
     chatId: z.string().min(1),
     cliId: z.enum(['claude', 'codex']),
@@ -44,7 +45,10 @@ export class JsonSessionStore implements SessionStore {
     /** 写队列：每次 save 追加一个任务，前一个完成后才执行下一个 */
     private writeQueue: Promise<void> = Promise.resolve();
 
-    constructor(private readonly filePath: string) { }
+    constructor(
+        private readonly filePath: string,
+        private readonly legacyBotId = 'default'
+    ) { }
 
     /**
      * 读取并校验会话文件，完整流程：
@@ -72,13 +76,17 @@ export class JsonSessionStore implements SessionStore {
         const sessions: Session[] = [];
         let needsCleanup = false; // 是否需要回写修复磁盘数据
         for (const row of rows) {
-            const result = SessionSchema.safeParse(row);
+            const isLegacy =
+                typeof row === "object" && row !== null && !("botId" in row);
+            const candidate = isLegacy ? { ...row, botId: this.legacyBotId } : row;
+            const result = SessionSchema.safeParse(candidate);
             if (!result.success) {
                 // 结构非法的记录：跳过 + 触发回写清理
                 needsCleanup = true;
                 // 跳过非法记录
                 continue;
             }
+            if (isLegacy) needsCleanup = true;
             // 把每一条中断的状态改为 idle
             const recovered = recoverInterruptedSession(result.data);
             if (recovered.status !== result.data.status) needsCleanup = true;

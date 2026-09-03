@@ -20,9 +20,10 @@ export const STATUS_LABELS: Record<Session['status'], string> = {
 };
 
 /** 格式化会话状态文本，用于 /status 命令回复 */
-export function formatSessionStatus(session: Session): string {
+export function formatSessionStatus(session: Session, botId: string): string {
     const adapter = getCliAdapter(session.cliId);
     return [
+        `机器人 Bot：${botId}`,
         `会话：${session.id}`,
         `状态：${STATUS_LABELS[session.status]}`,
         `执行引擎：${adapter.displayName}`,

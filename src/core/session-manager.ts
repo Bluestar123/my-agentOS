@@ -20,6 +20,8 @@ export type SessionStatus = 'creating' | 'active' | 'idle' | 'closed';
 export interface Session {
     /** 会话唯一 ID（UUID） */
     id: string;
+    // 身份 开发者还是cr者
+    botId: string;
     /** 话题 ID：同一话题内所有消息共享；无话题时退化为 rootId 或 messageId */
     threadId: string;
     /** 会话 ID：单聊/群聊的唯一标识 */
@@ -87,8 +89,9 @@ function topicIdOf(message: MessageAddress): string {
 }
 
 /** 会话在内存 Map 中的键：chatId + ":" + topicId，保证一个话题最多一个会话 */
-function sessionKey(chatId: string, threadId: string): string {
-    return `${chatId}:${threadId}`;
+// 以前只要群和话题相同，程序就认为是同一个会话。现在 botId 也参与计算，开发助手和审查助手即使出现在同一话题里，也会得到两个独立会话
+function sessionKey(botId: string, chatId: string, threadId: string): string {
+    return `${botId}:${chatId}:${threadId}`;
 }
 
 /**
@@ -121,7 +124,7 @@ export class SessionManager {
         const manager = new SessionManager(options);
         const restored = await options.store?.load() ?? [];
         for (const session of restored) {
-            manager.sessions.set(sessionKey(session.chatId, session.threadId), session);
+            manager.sessions.set(sessionKey(session.botId, session.chatId, session.threadId), session);
         }
         return manager;
     }
@@ -144,15 +147,20 @@ export class SessionManager {
      *    下次消息到来会重新创建
      * @returns { session, isNew }：isNew=true 表示本次消息创建了新会话
      */
-    async resolve(message: MessageAddress, cliId: CliId = 'claude'): Promise<ResolvedSession> {
+    async resolve(
+        message: MessageAddress,
+        cliId: CliId = 'claude',
+        botId = 'default'
+    ): Promise<ResolvedSession> {
         const threadId = topicIdOf(message);
-        const key = sessionKey(message.chatId, threadId);
+        const key = sessionKey(botId, message.chatId, threadId);
         const existing = this.sessions.get(key);
         if (existing) return { session: existing, isNew: false };
 
         const now = this.now().toISOString();
         const session: Session = {
             id: this.createId(),
+            botId,
             threadId,
             chatId: message.chatId,
             cliId,
@@ -190,7 +198,7 @@ export class SessionManager {
             status: nextStatus,
             updatedAt: this.now().toISOString(),
         };
-        const key = sessionKey(updated.chatId, updated.threadId);
+        const key = sessionKey(updated.botId, updated.chatId, updated.threadId);
         this.sessions.set(key, updated);
         try {
             await this.persist();
@@ -221,7 +229,7 @@ export class SessionManager {
             cliSessionId,
             updatedAt: this.now().toISOString(),
         };
-        const key = sessionKey(updated.chatId, updated.threadId);
+        const key = sessionKey(updated.botId, updated.chatId, updated.threadId);
         this.sessions.set(key, updated);
 
         try {
