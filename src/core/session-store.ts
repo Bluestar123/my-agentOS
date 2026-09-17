@@ -23,7 +23,36 @@ const SessionSchema = z.object({
     status: z.enum(["creating", "active", "idle", "closed"]),
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
+    workspaceDir: z.string().min(1),
 });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+// 给旧记录补齐缺失的 botId 和 workspaceDir
+function migrateLegacySession(
+    row: unknown,
+    legacyBotId: string,
+    defaultWorkspaces: Readonly<Record<string, string>>,
+): { candidate: unknown; migrated: boolean } {
+    if (!isRecord(row)) return { candidate: row, migrated: false };
+
+    const needsBotId = !('botId' in row);
+    const needsWorkspace = !('workspaceDir' in row);
+    if (!needsBotId && !needsWorkspace) {
+        return { candidate: row, migrated: false };
+    }
+
+    const candidate: Record<string, unknown> = { ...row };
+    if (needsBotId) candidate.botId = legacyBotId;
+    const botId =
+        typeof candidate.botId === 'string' ? candidate.botId : legacyBotId;
+    if (needsWorkspace) {
+        candidate.workspaceDir = defaultWorkspaces[botId] ?? process.cwd();
+    }
+    return { candidate, migrated: true };
+}
+
 
 /**
  * 崩溃恢复：上次退出时仍处于 creating / active 的会话，
@@ -47,7 +76,8 @@ export class JsonSessionStore implements SessionStore {
 
     constructor(
         private readonly filePath: string,
-        private readonly legacyBotId = 'default'
+        private readonly legacyBotId = 'default',
+        private readonly defaultWorkspaces: Readonly<Record<string, string>> = {},
     ) { }
 
     /**
@@ -76,9 +106,11 @@ export class JsonSessionStore implements SessionStore {
         const sessions: Session[] = [];
         let needsCleanup = false; // 是否需要回写修复磁盘数据
         for (const row of rows) {
-            const isLegacy =
-                typeof row === "object" && row !== null && !("botId" in row);
-            const candidate = isLegacy ? { ...row, botId: this.legacyBotId } : row;
+            const { candidate, migrated } = migrateLegacySession(
+                row,
+                this.legacyBotId,
+                this.defaultWorkspaces,
+            );
             const result = SessionSchema.safeParse(candidate);
             if (!result.success) {
                 // 结构非法的记录：跳过 + 触发回写清理
@@ -86,7 +118,7 @@ export class JsonSessionStore implements SessionStore {
                 // 跳过非法记录
                 continue;
             }
-            if (isLegacy) needsCleanup = true;
+            if (migrated) needsCleanup = true;
             // 把每一条中断的状态改为 idle
             const recovered = recoverInterruptedSession(result.data);
             if (recovered.status !== result.data.status) needsCleanup = true;

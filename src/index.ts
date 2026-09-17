@@ -28,15 +28,14 @@ import { runCli } from "./cli/runner.js";
 import { requestTaskAbort, type ActiveRun } from "./core/task-abort.js";
 import { CliAdapter } from './cli/types.js';
 import {
+    ensureWorkspaceDirectory,
+    resolveWorkspacePath,
+} from './core/workspace.js';
+import {
     buildBotPrompt,
     loadBotConfigs,
     type BotConfig,
 } from "./core/bot-registry.js";
-
-// 默认 agentos 目录
-const cliWorkdir = resolve(
-    process.env.CLI_WORKDIR ?? process.env.CLAUDE_WORKDIR ?? process.cwd(),
-);
 
 
 const botConfigPath = resolve(
@@ -44,9 +43,20 @@ const botConfigPath = resolve(
 );
 const botConfigs = await loadBotConfigs(botConfigPath);
 
+await Promise.all(
+    botConfigs.map((config) => ensureWorkspaceDirectory(config.workspaceDir)),
+);
+const defaultWorkspaces = Object.fromEntries(
+    botConfigs.map((config) => [config.id, config.workspaceDir]),
+);
+
 // 恢复历史会话：重启后能接着上次的话题继续对话
 const sessions = await SessionManager.open({
-    store: new JsonSessionStore(join("data", "sessions.json"), botConfigs[0]?.id),
+    store: new JsonSessionStore(
+        join('data', 'sessions.json'),
+        botConfigs[0]?.id,
+        defaultWorkspaces,
+    ),
 });
 
 // 正在执行的任务表：sessionId → AbortController，供 /close 命令中止后台任务
@@ -59,13 +69,11 @@ console.log(
     `[配置] 已注册 ${botConfigs.length} 个 bot，已恢复 ${sessions.size} 个会话`,
 );
 for (const adapter of listCliAdapters()) {
-    console.log(
-        `[CLI] id=${adapter.id} command=${adapter.command} cwd=${cliWorkdir}`,
-    );
+    console.log(`[CLI] id=${adapter.id} command=${adapter.command}`);
 }
 for (const config of botConfigs) {
     console.log(
-        `[Bot ${config.id.toUpperCase()}] default_cli=${config.defaultCliId}`,
+        `[Bot ${config.id.toUpperCase()}] default_cli=${config.defaultCliId} workspace=${config.workspaceDir}`,
     );
 }
 
@@ -73,6 +81,7 @@ for (const config of botConfigs) {
 function executeCli(
     adapter: CliAdapter,
     prompt: string,
+    workspaceDir: string,
     sessionId: string | undefined,
     signal: AbortSignal,
     onEvent: Parameters<typeof runCli>[0]["onEvent"],
@@ -80,7 +89,7 @@ function executeCli(
     return runCli({
         adapter,
         prompt,
-        cwd: cliWorkdir,
+        cwd: workspaceDir,
         signal,
         sessionId,
         onEvent
@@ -122,6 +131,8 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
             console.log(`rootid=${msg.rootId} threadid=${msg.threadId}`)
             // 是否在话题内：有 threadId 或 rootId 就算（决定回复是否进入话题）
             const hasThread = !!msg.threadId || !!msg.rootId;
+
+            const command = parseCommand(resolved);
             const cliRequest = parseCliRequest(resolved);
             if (cliRequest && !cliRequest.prompt) {
                 await bot.reply(
@@ -132,8 +143,13 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
                 return;
             }
             // 显式写了 /claude 或 /codex 时优先使用用户选择，否则使用当前 bot 的 defaultCliId
-            const { session, isNew } = await sessions.resolve(msg,
-                cliRequest?.cliId ?? config.defaultCliId, config.id);
+            const resolvedSession = await sessions.resolve(msg,
+                cliRequest?.cliId ?? config.defaultCliId, config.id, config.workspaceDir,);
+            let { session } = resolvedSession;
+            const { isNew } = resolvedSession;
+            if (command && isNew && session.status === 'creating') {
+                session = await sessions.transition(session.id, 'idle');
+            }
             const cliAdapter = getCliAdapter(session.cliId);
             const prompt = buildBotPrompt(
                 config.systemPrompt,
@@ -161,12 +177,12 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
                 `  [会话] ${isNew ? "新建" : "复用"} id=${session.id} status=${session.status}`,
             );
 
-            // ── 命令分发：/help /status /close 直接处理，不进入任务流程 ──
-            const command = parseCommand(resolved);
             if (command?.name === 'help') {
                 await bot.reply(
                     msg.messageId,
                     ['/status 查看当前会话',
+                        '/cd 查看当前工作目录',
+                        '/cd <目录> 切换当前话题的工作目录',
                         '/close 关闭当前会话',
                         '/help 查看命令',
                         '/claude <任务> 新话题使用 Claude Code',
@@ -178,6 +194,47 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
             }
             if (command?.name === 'status') {
                 await bot.reply(msg.messageId, formatSessionStatus(session, config.id), hasThread);
+                return;
+            }
+            if (command?.name === 'cd') {
+                if (!command.path) {
+                    await bot.reply(
+                        msg.messageId,
+                        `当前工作目录：${session.workspaceDir}`,
+                        hasThread,
+                    );
+                    return;
+                }
+                if (session.status === 'active') {
+                    await bot.reply(
+                        msg.messageId,
+                        '当前任务仍在执行，结束后再切换工作目录。',
+                        hasThread,
+                    );
+                    return;
+                }
+                try {
+                    const workspaceDir = resolveWorkspacePath(
+                        command.path,
+                        session.workspaceDir,
+                    );
+                    await ensureWorkspaceDirectory(workspaceDir);
+                    const changed = workspaceDir !== session.workspaceDir;
+                    await sessions.setWorkspaceDir(session.id, workspaceDir);
+                    await bot.reply(
+                        msg.messageId,
+                        changed
+                            ? `工作目录已切换到：${workspaceDir}\n下一条任务会在这里建立新的 CLI 会话。`
+                            : `当前工作目录已经是：${workspaceDir}`,
+                        hasThread,
+                    );
+                } catch (error) {
+                    await bot.reply(
+                        msg.messageId,
+                        `无法切换工作目录：${(error as Error).message}`,
+                        hasThread,
+                    );
+                }
                 return;
             }
             if (command?.name === 'close') {
@@ -311,7 +368,7 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
             progressHeartbeat.unref();
 
             // 让事件回调尽快返回，Claude Code 在后台继续执行。
-            void executeCli(cliAdapter, resolved, session.cliSessionId, run.signal, (event) => {
+            void executeCli(cliAdapter, resolved, session.workspaceDir, session.cliSessionId, run.signal, (event) => {
                 if (
                     event.type !== "tool_start" &&
                     event.type !== "tool_end" &&

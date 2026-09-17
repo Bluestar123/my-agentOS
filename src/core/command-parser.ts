@@ -13,12 +13,11 @@
 import { CliId } from "../cli/types";
 
 /** 当前支持的命令名 */
-export type CommandName = 'close' | 'status' | 'help';
+export type SlashCommand =
+    | { name: 'close' | 'status' | 'help' }
+    | { name: 'cd'; path?: string };
 
-/** 解析结果：一条斜杠命令 */
-export interface SlashCommand {
-    name: CommandName;
-}
+
 
 /**
  * 命令匹配正则，逐段解释：
@@ -29,6 +28,7 @@ export interface SlashCommand {
  * 因此 "/status 给我看看" 这类带尾缀的文本不会被误判为命令。
  */
 const COMMAND_RE = /^(?:@.+\s+)?\/(close|status|help)\s*$/;
+const CD_RE = /^(?:@\S+\s+)?\/cd(?:\s+([\s\S]+?))?\s*$/;
 const CLI_REQUEST_RE = /^(?:@\S+\s+)?\/(claude|codex)(?:\s+([\s\S]*))?$/;
 
 /**
@@ -37,9 +37,12 @@ const CLI_REQUEST_RE = /^(?:@\S+\s+)?\/(claude|codex)(?:\s+([\s\S]*))?$/;
  * @returns 匹配到命令返回 { name }；否则返回 undefined（按普通消息继续处理）
  */
 export function parseCommand(text: string): SlashCommand | undefined {
-    const match = COMMAND_RE.exec(text.trim());
+    const value = text.trim();
+    const cdMatch = CD_RE.exec(value);
+    if (cdMatch) return { name: 'cd', path: cdMatch[1]?.trim() || undefined };
+    const match = COMMAND_RE.exec(value);
     if (!match) return undefined;
-    return { name: match[1] as CommandName };
+    return { name: match[1] as 'close' | 'status' | 'help' };
 }
 
 
