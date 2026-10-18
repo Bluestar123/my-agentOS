@@ -243,6 +243,19 @@ export class ClaudeAdapter implements CliAdapter {
         return ["--resume", sessionId, ...outputArgs(prompt)];
     }
 
+    buildCompactPlan(sessionId: string, instructions?: string) {
+        const command = instructions?.trim()
+            ? `/compact ${instructions.trim()}`
+            : '/compact';
+        return {
+            protocol: 'claude-stream-json' as const,
+            command: this.command,
+            // prompt 走 stdin（`-p -`），runClaudeCompact 需要这份文本写入子进程。
+            prompt: command,
+            args: this.buildResumeArgs(command, sessionId),
+        };
+    }
+
     /**
      * 解析单行 JSON 输出为单个事件（仅返回第一个）
      * 用于只需要处理单个事件的场景

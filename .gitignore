@@ -5,3 +5,5 @@ data/
 *.log
 
 config/bots.json
+
+test1/

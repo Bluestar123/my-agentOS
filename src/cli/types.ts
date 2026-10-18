@@ -1,5 +1,20 @@
 export type CliId = "claude" | 'codex';
 
+
+export type CliCompactPlan =
+    | {
+        protocol: 'claude-stream-json';
+        command: string;
+        args: string[];
+        prompt: string;
+    }
+    | {
+        protocol: 'codex-app-server';
+        command: string;
+        args: string[];
+        sessionId: string;
+    };
+
 export type CliPromptInput = "argument" | "stdin";
 
 // // Windows 上 prompt 必须走 stdin（避免 cmd 对命令行参数转义/乱码），其他平台直接走参数。
@@ -17,6 +32,12 @@ export interface CliRunStats {
     cacheCreationTokens?: number;
     contextUsedTokens?: number;
     contextWindowTokens?: number;
+}
+
+export interface CliSessionSummary {
+    id: string;
+    title: string;
+    updatedAt: string;
 }
 
 export type CliEvent =
@@ -41,6 +62,7 @@ export interface CliAdapter {
     buildArgs(prompt: string, promptInput: CliPromptInput): string[];
     // 以后会话怎么续接
     buildResumeArgs(prompt: string, sessionId: string, promptInput: CliPromptInput): string[];
+    buildCompactPlan(sessionId: string, instructions?: string): CliCompactPlan;
     // 原始输出统一解析
     parseEvents(line: string): CliEvent[];
     parseEvent(line: string): CliEvent | undefined;

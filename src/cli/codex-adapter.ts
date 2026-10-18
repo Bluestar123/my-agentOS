@@ -125,6 +125,15 @@ export class CodexAdapter implements CliAdapter {
         return args;
     }
 
+    buildCompactPlan(sessionId: string) {
+        return {
+            protocol: 'codex-app-server' as const,
+            command: this.command,
+            args: ['app-server', '--stdio'],
+            sessionId,
+        };
+    }
+
     parseEvent(line: string): CliEvent | undefined {
         return this.parseEvents(line)[0];
     }
